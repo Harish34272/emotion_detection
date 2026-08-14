@@ -1,0 +1,11 @@
+pip3 install sqlalchemy alembic python-dotenv postgresql postgresql-contrib
+i set default password  for postgres
+sudo -u postgres psql it will open psql in terminal  we neeed to give password ALTER USER postgres PASSWORD 'postgres'
+next we need to run sudo -u postgres createdb emotion_project it will create the db
+
+
+ls -la /dev/v4l/by-id/ to get the id of camera
+python3 enroll_student_live.py --name "Harish Kumar" --roll 21011052 --dept CSE --year 3
+python3 recognize_and_log.py --camera-location mess_entry
+python3 recognize_and_log.py --camera-location mess_entry --show-labels
+python3 generate_dashboard.py
