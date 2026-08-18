@@ -1,0 +1,11 @@
+/*
+!/.gitignore
+!/program/
+
+program/**/__pycache__/
+program/**/*.pyc
+program/**/*.db
+program/**/*.sqlite3
+program/**/*.log
+program/source_photos/
+program/.env

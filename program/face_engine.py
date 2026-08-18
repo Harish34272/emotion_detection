@@ -1,14 +1,13 @@
-
+import platform
 import cv2
 import numpy as np
 import insightface
 from insightface.app import FaceAnalysis
 
 DET_SIZE = (320, 320)
-
 PROVIDERS = ["CPUExecutionProvider"]
 
-_app = None  # lazy-loaded singleton so the model only loads once per process
+_app = None
 
 
 def get_face_app():
@@ -20,7 +19,6 @@ def get_face_app():
 
 
 def get_faces(frame):
-    """Returns a list of InsightFace face objects (bbox, kps, embedding, etc.)."""
     app = get_face_app()
     return app.get(frame)
 
@@ -38,7 +36,16 @@ def open_capture(source):
         pipeline = source[len("gst:"):]
         return cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
 
-    cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+    # Pick the right backend for the current OS.
+    # Only apply V4L2 on Linux with an integer index / device path;
+    # RTSP URLs and other string sources should use OpenCV's default backend.
+    system = platform.system()
+    if isinstance(source, int) or (isinstance(source, str) and source.startswith("/dev/")):
+        backend = cv2.CAP_V4L2 if system == "Linux" else cv2.CAP_DSHOW if system == "Windows" else 0
+    else:
+        backend = 0  # let OpenCV auto-select for RTSP/URLs
+
+    cap = cv2.VideoCapture(source, backend)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)

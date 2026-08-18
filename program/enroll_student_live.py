@@ -7,6 +7,7 @@ import cv2
 from dotenv import load_dotenv
 load_dotenv()
 DEFAULT_CAMERA = os.environ.get("DEFAULT_CAMERA", 0) 
+
 from db import get_session
 from models import Student, FaceEmbedding
 from face_engine import get_faces, resize_for_display, open_capture
