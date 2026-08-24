@@ -311,6 +311,8 @@ def main():
                         posture_features = get_posture_for_frame(frame, len(faces_this_frame))
                         if posture_features is None and len(faces_this_frame) != 1:
                             print(f"  (skipped posture: {len(faces_this_frame)} faces in frame, ambiguous attribution)")
+                        if posture_features:
+                        	print(f"  [posture] {posture_features}")
 
                         event = DetectionEvent(
                             student_id=student_id,

@@ -1,34 +1,19 @@
-"""
-posture.py
-
-Shared posture/body-language feature extraction, pulled out of the
-standalone step1b_face_and_pose.py prototype so recognize_and_log.py can
-reuse it.
-
-WHAT'S REUSED: only compute_posture_features() -- the engineered-feature
-math (head_drop_px, torso_lean_px, torso_len_px). Unchanged from step1b.
-
-WHAT'S NOT REUSED: step1b's Haar cascade face detector. recognize_and_log.py
-already has face boxes from InsightFace every processed frame -- running a
-second, older detector on top would duplicate work for no benefit.
-
-IMPORTANT LIMITATION -- READ BEFORE CALLING get_posture_for_frame():
-mediapipe's mp.solutions.pose detects exactly ONE person's skeleton per
-frame, with no way to say which detected face that skeleton belongs to.
-In a multi-person frame (which is the normal case for mess/cafeteria
-scenes), there is no reliable way to know whose posture you just measured.
-
-So get_posture_for_frame() only runs pose estimation when exactly one
-face was detected in the frame this cycle -- otherwise it returns None
-without running the model at all. This is a deliberate, cheap guard
-against attributing posture to the wrong student, NOT a full solution.
-True multi-person posture (MediaPipe's newer Pose Landmarker task API, or
-running pose per face-crop) is a documented follow-up, not implemented
-here.
-"""
-
+import os
 import cv2
 import mediapipe as mp
+from mediapipe.tasks.python import BaseOptions
+from mediapipe.tasks.python import vision
+
+# Path to the downloaded .task model file. Adjust if you put it elsewhere.
+_MODEL_PATH = os.path.join(os.path.dirname(__file__),  "pose_landmarker_lite.task")
+
+# Landmark indices are unchanged from the old mp.solutions.pose.PoseLandmark enum --
+# the Tasks API kept the same 33-point ordering, it just dropped the enum wrapper.
+NOSE = 0
+LEFT_SHOULDER = 11
+RIGHT_SHOULDER = 12
+LEFT_HIP = 23
+RIGHT_HIP = 24
 
 _pose = None  # lazy-loaded singleton, same pattern as face_engine.get_face_app()
 
@@ -36,33 +21,34 @@ _pose = None  # lazy-loaded singleton, same pattern as face_engine.get_face_app(
 def get_pose_estimator():
     global _pose
     if _pose is None:
-        mp_pose = mp.solutions.pose
-        _pose = mp_pose.Pose(
-            model_complexity=1,
-            min_detection_confidence=0.5,
+        base_options = BaseOptions(model_asset_path=_MODEL_PATH)
+        options = vision.PoseLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.IMAGE,
+            num_poses=1,
+            min_pose_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
+        _pose = vision.PoseLandmarker.create_from_options(options)
     return _pose
 
 
 def compute_posture_features(landmarks, frame_w, frame_h):
     """
     Engineered posture features from MediaPipe Pose landmarks.
-    Unchanged from step1b_face_and_pose.py -- crude but a starting point;
+    Unchanged logic from step1b_face_and_pose.py -- crude but a starting point;
     thresholds still need tuning against real footage.
     """
-    mp_pose = mp.solutions.pose
-
     def px(lm_idx):
         lm = landmarks[lm_idx]
         return lm.x * frame_w, lm.y * frame_h
 
     try:
-        l_shoulder = px(mp_pose.PoseLandmark.LEFT_SHOULDER.value)
-        r_shoulder = px(mp_pose.PoseLandmark.RIGHT_SHOULDER.value)
-        nose = px(mp_pose.PoseLandmark.NOSE.value)
-        l_hip = px(mp_pose.PoseLandmark.LEFT_HIP.value)
-        r_hip = px(mp_pose.PoseLandmark.RIGHT_HIP.value)
+        l_shoulder = px(LEFT_SHOULDER)
+        r_shoulder = px(RIGHT_SHOULDER)
+        nose = px(NOSE)
+        l_hip = px(LEFT_HIP)
+        r_hip = px(RIGHT_HIP)
     except Exception:
         return {}
 
@@ -103,11 +89,16 @@ def get_posture_for_frame(frame, num_faces_in_frame):
 
     pose = get_pose_estimator()
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = pose.process(rgb)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    results = pose.detect(mp_image)
 
     if not results.pose_landmarks:
+        print("  [posture debug] pose model found no landmarks in frame")
         return None
 
     h, w = frame.shape[:2]
-    feats = compute_posture_features(results.pose_landmarks.landmark, w, h)
+    landmarks = results.pose_landmarks[0]  # first (only) detected person
+    feats = compute_posture_features(landmarks, w, h)
+    if not feats:
+        print("  [posture debug] landmarks found but a required joint was missing/low-confidence")
     return feats or None
