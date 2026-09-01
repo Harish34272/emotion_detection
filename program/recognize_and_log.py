@@ -167,7 +167,7 @@ def get_emotion(face_crop):
 # --- DEBUG INSTRUMENTATION (temporary -- for diagnosing the sad-detection
 # issue. Remove or gate behind a flag once root cause is found; this is not
 # the planned source_photos/detections/ feature, just throwaway debug output) ---
-DEBUG_SAVE_EMOTION_CROPS = True
+DEBUG_SAVE_EMOTION_CROPS = os.environ.get("DEBUG_EMOTION_CROPS", "0") == "1"
 DEBUG_CROP_DIR = "source_photos/detections"
 
 
@@ -317,9 +317,9 @@ def main():
                         event = DetectionEvent(
                             student_id=student_id,
                             camera_id=camera.camera_id,
-                            matched_confidence=1 - distance,
+                            matched_confidence=float(1 - distance),
                             emotion_label=emotion_label,
-                            emotion_confidence=emotion_confidence,
+                            emotion_confidence=float(emotion_confidence) if emotion_confidence is not None else None,
                             posture_features=posture_features,
                         )
                         session.add(event)

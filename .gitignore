@@ -9,3 +9,4 @@ program/**/*.sqlite3
 program/**/*.log
 program/source_photos/
 program/.env
+program/emotional_detection_dashboard.html
