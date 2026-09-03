@@ -349,10 +349,9 @@ def build_html(students_html, detections_html, flags_html, pending_count, studen
 <body>
 <header>
   <h1>Wellness Monitoring — Dashboard</h1>
-  <div class="meta">Generated {generated_at} · re-run generate_dashboard.py to refresh</div>
 </header>
 <div class="banner">
-  {pending_count} flag(s) pending review. This dashboard is read-only reference — resolve flags directly in the database or a future review tool.
+  {pending_count} flag(s) pending review.
 </div>
 <main>
   <section>
@@ -451,25 +450,4 @@ function closeStudentDetail(e) {{
 </script>
 </body>
 </html>"""
-
-
-def main():
-    session = get_session()
-
-    students_html = build_students_section(session)
-    detections_html = build_detections_section(session)
-    flags_html = build_flags_section(session)
-    student_data = build_student_detail_data(session)
-    pending_count = session.query(Flag).filter_by(status="pending").count()
-
-    html = build_html(students_html, detections_html, flags_html, pending_count, student_data)
-    # with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-    #     f.write(html)
-
-
-    session.close()
-    print(f"Dashboard written to {os.path.abspath(OUTPUT_FILE)}")
-    print(f"Open it in a browser, or run: python3 -m http.server 8080")
-
-main()
 
