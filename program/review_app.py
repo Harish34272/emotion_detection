@@ -1,8 +1,12 @@
 import os
 from datetime import date
+
+import cv2
+import numpy as np
 from flask import Flask, redirect, url_for, request, send_from_directory, abort, jsonify
 from db import get_session
-from models import Flag, Student, StudentLeave, HostelClosure
+from models import Flag, Student, FaceEmbedding, StudentLeave, HostelClosure
+from face_engine import get_faces
 from generate_dashboard import (
     build_students_section,
     build_detections_section,
@@ -15,6 +19,13 @@ app = Flask(__name__)
 VALID_STATUSES = {"pending", "reviewed", "dismissed", "handled"}
 
 CROPS_ROOT = os.path.abspath("source_photos/detections")
+
+# ---- enrollment config -----------------------------------------------------
+# Mirrors enroll_student.py's layout/logic so photos captured via the warden
+# UI land in the exact same place and DB shape as the CLI enrollment tools.
+ENROLL_POSES = ("straight", "left", "right")
+ENROLL_SAVE_DIR = os.path.abspath("source_photos/enrollment")
+MIN_VALID_POSES = 2
 
 
 # ---- static file serving -------------------------------------------------
@@ -45,6 +56,375 @@ def student_photos(student_id):
         ])
     finally:
         session.close()
+
+
+# ---- enrollment ------------------------------------------------------------
+
+def _validate_and_embed_frame(frame):
+    """
+    Same rule as enroll_student.py/enroll_student_live.py: run InsightFace,
+    accept only if exactly one clear face is found. Returns (embedding, error).
+    """
+    faces = get_faces(frame)
+    if len(faces) == 0:
+        return None, "no face detected"
+    if len(faces) > 1:
+        return None, f"{len(faces)} faces detected — expected exactly 1"
+    return faces[0].embedding, None
+
+
+@app.route("/enroll")
+def enroll_page():
+    return ENROLL_PAGE_HTML
+
+
+@app.route("/enroll/submit", methods=["POST"])
+def enroll_submit():
+    name = request.form.get("name", "").strip()
+    roll = request.form.get("roll", "").strip()
+    dept = request.form.get("dept", "").strip()
+    year_raw = request.form.get("year", "").strip()
+    year = int(year_raw) if year_raw.isdigit() else None
+
+    if not name or not roll or not dept:
+        return jsonify({"ok": False, "error": "Name, roll number, and department are required."}), 400
+
+    safe_roll = roll.replace("/", "_")
+    student_dir = os.path.join(ENROLL_SAVE_DIR, safe_roll)
+    os.makedirs(student_dir, exist_ok=True)
+
+    pose_results = {}
+    captured_photos = {}
+    captured_embeddings = {}
+
+    for pose in ENROLL_POSES:
+        file = request.files.get(pose)
+        if not file or file.filename == "":
+            pose_results[pose] = {"ok": False, "detail": "no photo provided"}
+            continue
+
+        data = file.read()
+        arr = np.frombuffer(data, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            pose_results[pose] = {"ok": False, "detail": "could not decode image"}
+            continue
+
+        embedding, err = _validate_and_embed_frame(frame)
+        if err:
+            pose_results[pose] = {"ok": False, "detail": err}
+            continue
+
+        dest_path = os.path.join(student_dir, f"{pose}.jpg")
+        cv2.imwrite(dest_path, frame)
+        captured_photos[pose] = dest_path
+        captured_embeddings[pose] = embedding
+        pose_results[pose] = {"ok": True, "detail": "saved"}
+
+    if len(captured_embeddings) < MIN_VALID_POSES:
+        return jsonify({
+            "ok": False,
+            "error": f"Need at least {MIN_VALID_POSES} valid poses (got {len(captured_embeddings)}).",
+            "poses": pose_results,
+        }), 400
+
+    session = get_session()
+    try:
+        existing = session.query(Student).filter_by(roll_number=roll).first()
+        if existing:
+            student = existing
+            created_new = False
+        else:
+            student = Student(
+                name=name,
+                roll_number=roll,
+                department=dept,
+                year_of_study=year,
+                photo_reference_path=captured_photos.get("straight"),
+            )
+            session.add(student)
+            session.commit()
+            created_new = True
+
+        student_id = student.student_id
+        student_name = student.name
+
+        added = 0
+        for pose, embedding in captured_embeddings.items():
+            fe = FaceEmbedding(
+                student_id=student_id,
+                embedding=embedding.tolist(),
+                angle_label=pose,
+                source_photo=captured_photos[pose],
+            )
+            session.add(fe)
+            added += 1
+        session.commit()
+
+        return jsonify({
+            "ok": True,
+            "student_id": student_id,
+            "student_name": student_name,
+            "created_new": created_new,
+            "embeddings_added": added,
+            "poses": pose_results,
+        })
+    except Exception as e:
+        session.rollback()
+        return jsonify({"ok": False, "error": f"DB save failed: {e}", "poses": pose_results}), 500
+    finally:
+        session.close()
+
+
+ENROLL_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Enroll Student — Wellness Monitoring</title>
+<style>
+  :root {
+    --bg: #F5F6F8; --panel: #FFFFFF; --ink: #1F2933; --muted: #6B7280;
+    --border: #E2E5EA; --accent: #3E5C76; --accent-soft: #E9EEF3;
+    --sans: 'IBM Plex Sans', 'Inter', -apple-system, sans-serif;
+    --mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:var(--sans); line-height:1.5; }
+  header { background:var(--panel); border-bottom:1px solid var(--border); padding:24px 40px;
+           display:flex; align-items:center; justify-content:space-between; }
+  header h1 { margin:0; font-size:1.3rem; font-weight:600; }
+  header a { color:var(--accent); font-size:0.85rem; text-decoration:none; font-family:var(--mono); }
+  header a:hover { text-decoration:underline; }
+  main { max-width:820px; margin:0 auto; padding:32px 40px 80px; }
+  section { background:var(--panel); border:1px solid var(--border); border-radius:6px;
+            margin-bottom:24px; padding:24px; }
+  section h2 { margin:0 0 16px; font-size:0.85rem; font-weight:600; text-transform:uppercase;
+               letter-spacing:0.04em; color:var(--accent); }
+  .field-row { display:flex; gap:14px; flex-wrap:wrap; margin-bottom:14px; }
+  label.field { display:flex; flex-direction:column; gap:4px; font-size:0.78rem; color:var(--muted); flex:1; min-width:160px; }
+  input[type=text], input[type=number] { padding:8px 10px; border:1px solid var(--border); border-radius:4px; font-size:0.9rem; }
+  .pose-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:16px; }
+  .pose-card { border:1px dashed var(--border); border-radius:6px; padding:14px; text-align:center; }
+  .pose-card h3 { margin:0 0 10px; font-size:0.8rem; text-transform:uppercase; color:var(--muted); letter-spacing:0.04em; }
+  .pose-preview { width:100%; height:150px; object-fit:cover; border-radius:4px; background:var(--bg);
+                   display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:0.8rem;
+                   border:1px solid var(--border); margin-bottom:10px; }
+  .pose-preview img { width:100%; height:100%; object-fit:cover; border-radius:4px; }
+  .pose-buttons { display:flex; gap:8px; justify-content:center; }
+  .btn { background:var(--accent); color:white; border:none; padding:6px 12px; border-radius:4px;
+         font-size:0.78rem; cursor:pointer; }
+  .btn:hover { opacity:0.85; }
+  .btn.secondary { background:var(--accent-soft); color:var(--accent); }
+  .btn.submit { padding:10px 24px; font-size:0.9rem; }
+  .pose-status { margin-top:8px; font-size:0.75rem; font-family:var(--mono); color:var(--muted); }
+  .pose-status.ok { color:#1F7A4D; }
+  .pose-status.err { color:#B45309; }
+  input[type=file] { display:none; }
+  #resultBox { margin-top:16px; padding:12px 16px; border-radius:4px; font-size:0.85rem; display:none; }
+  #resultBox.ok { background:#EAF6EF; color:#1F7A4D; display:block; }
+  #resultBox.err { background:#FBEAEA; color:#B4231E; display:block; }
+  .camera-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6);
+                     align-items:center; justify-content:center; z-index:200; }
+  .camera-panel { background:var(--panel); border-radius:8px; padding:20px; text-align:center; }
+  .camera-panel video, .camera-panel canvas { width:360px; height:270px; border-radius:6px; background:#000; }
+  .camera-actions { margin-top:12px; display:flex; gap:10px; justify-content:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Enroll New Student</h1>
+  <a href="/">&larr; Back to dashboard</a>
+</header>
+<main>
+  <section>
+    <h2>Student Details</h2>
+    <div class="field-row">
+      <label class="field">Full name
+        <input type="text" id="f-name" required>
+      </label>
+      <label class="field">Roll number
+        <input type="text" id="f-roll" required>
+      </label>
+    </div>
+    <div class="field-row">
+      <label class="field">Department
+        <input type="text" id="f-dept" required>
+      </label>
+      <label class="field">Year of study
+        <input type="number" id="f-year" min="1" max="6">
+      </label>
+    </div>
+  </section>
+
+  <section>
+    <h2>Face Photos (need at least 2 of 3)</h2>
+    <div class="pose-grid" id="poseGrid"></div>
+  </section>
+
+  <button class="btn submit" id="submitBtn">Enroll Student</button>
+  <div id="resultBox"></div>
+</main>
+
+<div class="camera-overlay" id="cameraOverlay">
+  <div class="camera-panel">
+    <video id="cameraVideo" autoplay playsinline></video>
+    <canvas id="cameraCanvas" style="display:none;"></canvas>
+    <div class="camera-actions">
+      <button class="btn" id="captureBtn">Capture</button>
+      <button class="btn secondary" id="cancelCameraBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const POSES = [
+  {key: "straight", label: "Straight", hint: "Look directly at camera"},
+  {key: "left", label: "Left", hint: "Turn ~30-45° to your left"},
+  {key: "right", label: "Right", hint: "Turn ~30-45° to your right"},
+];
+
+const photos = {}; // pose -> Blob
+let activePose = null;
+let cameraStream = null;
+
+const poseGrid = document.getElementById("poseGrid");
+POSES.forEach(p => {
+  const card = document.createElement("div");
+  card.className = "pose-card";
+  card.innerHTML = `
+    <h3>${p.label}</h3>
+    <div class="pose-preview" id="preview-${p.key}">${p.hint}</div>
+    <div class="pose-buttons">
+      <label class="btn secondary" style="margin:0;">
+        Upload
+        <input type="file" accept="image/*" id="file-${p.key}">
+      </label>
+      <button class="btn" data-pose="${p.key}" data-action="camera">Camera</button>
+    </div>
+    <div class="pose-status" id="status-${p.key}"></div>
+  `;
+  poseGrid.appendChild(card);
+
+  document.getElementById(`file-${p.key}`).addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (file) setPosePhoto(p.key, file);
+  });
+});
+
+poseGrid.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-action='camera']");
+  if (btn) openCamera(btn.dataset.pose);
+});
+
+function setPosePhoto(pose, blob) {
+  photos[pose] = blob;
+  const preview = document.getElementById(`preview-${pose}`);
+  const url = URL.createObjectURL(blob);
+  preview.innerHTML = `<img src="${url}">`;
+  const status = document.getElementById(`status-${pose}`);
+  status.textContent = "Ready";
+  status.className = "pose-status";
+}
+
+async function openCamera(pose) {
+  activePose = pose;
+  document.getElementById("cameraOverlay").style.display = "flex";
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+    document.getElementById("cameraVideo").srcObject = cameraStream;
+  } catch (err) {
+    alert("Could not access camera: " + err.message);
+    closeCamera();
+  }
+}
+
+function closeCamera() {
+  if (cameraStream) {
+    cameraStream.getTracks().forEach(t => t.stop());
+    cameraStream = null;
+  }
+  document.getElementById("cameraOverlay").style.display = "none";
+  activePose = null;
+}
+
+document.getElementById("cancelCameraBtn").addEventListener("click", closeCamera);
+
+document.getElementById("captureBtn").addEventListener("click", () => {
+  const video = document.getElementById("cameraVideo");
+  const canvas = document.getElementById("cameraCanvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+  canvas.toBlob((blob) => {
+    if (blob && activePose) setPosePhoto(activePose, blob);
+    closeCamera();
+  }, "image/jpeg", 0.92);
+});
+
+document.getElementById("submitBtn").addEventListener("click", async () => {
+  const name = document.getElementById("f-name").value.trim();
+  const roll = document.getElementById("f-roll").value.trim();
+  const dept = document.getElementById("f-dept").value.trim();
+  const year = document.getElementById("f-year").value.trim();
+  const resultBox = document.getElementById("resultBox");
+
+  if (!name || !roll || !dept) {
+    resultBox.className = "err";
+    resultBox.textContent = "Name, roll number, and department are required.";
+    return;
+  }
+  const providedCount = Object.keys(photos).length;
+  if (providedCount < 2) {
+    resultBox.className = "err";
+    resultBox.textContent = "Please provide at least 2 pose photos.";
+    return;
+  }
+
+  const fd = new FormData();
+  fd.append("name", name);
+  fd.append("roll", roll);
+  fd.append("dept", dept);
+  if (year) fd.append("year", year);
+  for (const [pose, blob] of Object.entries(photos)) {
+    fd.append(pose, blob, `${pose}.jpg`);
+  }
+
+  const submitBtn = document.getElementById("submitBtn");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Enrolling…";
+
+  try {
+    const res = await fetch("/enroll/submit", { method: "POST", body: fd });
+    const data = await res.json();
+
+    for (const pose of Object.keys(photos)) {
+      const st = document.getElementById(`status-${pose}`);
+      const r = data.poses && data.poses[pose];
+      if (r) {
+        st.textContent = r.detail;
+        st.className = "pose-status " + (r.ok ? "ok" : "err");
+      }
+    }
+
+    if (data.ok) {
+      resultBox.className = "ok";
+      resultBox.textContent = `Success — ${data.student_name} (${data.created_new ? "new student" : "existing student"}), ${data.embeddings_added} embedding(s) saved.`;
+    } else {
+      resultBox.className = "err";
+      resultBox.textContent = data.error || "Enrollment failed.";
+    }
+  } catch (err) {
+    resultBox.className = "err";
+    resultBox.textContent = "Request failed: " + err.message;
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Enroll Student";
+  }
+});
+</script>
+</body>
+</html>"""
 
 
 # ---- flag section (editable) ---------------------------------------------
@@ -255,6 +635,15 @@ def build_full_page(session):
     # insert CSS into <head> and sections before </main>
     base_html = base_html.replace("</head>", extra_css + "\n</head>", 1)
     base_html = base_html.replace("</main>", leave_section + closure_section + "\n</main>", 1)
+
+    # add an "Enroll New Student" link into the header
+    base_html = base_html.replace(
+        "<h1>Wellness Monitoring — Dashboard</h1>",
+        '<h1>Wellness Monitoring — Dashboard</h1>'
+        '<a href="/enroll" style="float:right; color:#3E5C76; font-size:0.85rem; '
+        'text-decoration:none; font-family:\'IBM Plex Mono\',monospace;">+ Enroll New Student</a>',
+        1,
+    )
     return base_html
 
 
