@@ -17,11 +17,10 @@ class Student(Base):
     year_of_study = Column(Integer, nullable=True)  # 1/2/3/4
     photo_reference_path = Column(Text, nullable=True)
     enrolled_at = Column(DateTime(timezone=True), server_default=func.now())
-
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    phone_number = Column(String(20), nullable=True)
     # --- add new fields here later, e.g.: ---
     # hostel_block = Column(String(50), nullable=True)
-    # phone_number = Column(String(20), nullable=True)
-
     embeddings = relationship("FaceEmbedding", back_populates="student", cascade="all, delete-orphan")
     detections = relationship("DetectionEvent", back_populates="student")
     flags = relationship("Flag", back_populates="student")

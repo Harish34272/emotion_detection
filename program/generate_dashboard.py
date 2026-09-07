@@ -1,4 +1,3 @@
-
 """generate_dashboard.py"""
 import os
 from datetime import datetime, timezone
@@ -18,8 +17,17 @@ STATUS_COLORS = {
 }
 
 
-def build_students_section(session):
-    students = session.query(Student).order_by(Student.name).all()
+def build_students_section(session, include_inactive=False):
+    """
+    By default only shows active students -- deactivated students (graduated /
+    moved out) are hidden from this read-only snapshot, though their historical
+    detections/flags are untouched in the DB. Pass include_inactive=True (used
+    by the Flask review app) to see everyone, e.g. for reactivation.
+    """
+    query = session.query(Student)
+    if not include_inactive:
+        query = query.filter(Student.is_active.is_(True))
+    students = query.order_by(Student.name).all()
     rows = []
     for s in students:
         emb_count = session.query(FaceEmbedding).filter_by(student_id=s.student_id).count()

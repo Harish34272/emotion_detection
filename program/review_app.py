@@ -5,10 +5,9 @@ import cv2
 import numpy as np
 from flask import Flask, redirect, url_for, request, send_from_directory, abort, jsonify
 from db import get_session
-from models import Flag, Student, FaceEmbedding, StudentLeave, HostelClosure
+from models import Flag, Student, FaceEmbedding, DetectionEvent, StudentLeave, HostelClosure
 from face_engine import get_faces
 from generate_dashboard import (
-    build_students_section,
     build_detections_section,
     build_html,
     build_student_detail_data,
@@ -427,6 +426,91 @@ document.getElementById("submitBtn").addEventListener("click", async () => {
 </html>"""
 
 
+# ---- students section (editable — deactivate / reactivate) ----------------
+
+def build_students_section_editable(session):
+    """
+    Same data as generate_dashboard.build_students_section, but shows both
+    active and inactive students with a Deactivate/Reactivate action per row.
+    This is the only place inactive students are visible day-to-day -- the
+    static dashboard snapshot hides them by default.
+    """
+    from html import escape
+    students = (
+        session.query(Student)
+        .order_by(Student.is_active.desc(), Student.name)
+        .all()
+    )
+    rows = []
+    for s in students:
+        emb_count = session.query(FaceEmbedding).filter_by(student_id=s.student_id).count()
+        det_count = session.query(DetectionEvent).filter_by(student_id=s.student_id).count()
+
+        if s.is_active:
+            status_badge = '<span class="status-pill" style="background:#1F7A4D">active</span>'
+            action = f"""
+            <form method="POST" action="/students/{s.student_id}/deactivate"
+                  onsubmit="return confirm('Deactivate {escape(s.name)}? They will stop being matched by recognition. All history is kept and this can be undone.')">
+              <button type="submit" class="btn-danger">Deactivate</button>
+            </form>"""
+        else:
+            status_badge = '<span class="status-pill" style="background:#6B7280">inactive</span>'
+            action = f"""
+            <form method="POST" action="/students/{s.student_id}/reactivate">
+              <button type="submit" class="btn">Reactivate</button>
+            </form>"""
+
+        rows.append(f"""
+        <tr class="student-row">
+          <td onclick="showStudentDetail({s.student_id})" style="cursor:pointer">{s.student_id}</td>
+          <td onclick="showStudentDetail({s.student_id})" style="cursor:pointer">{escape(s.name)}</td>
+          <td onclick="showStudentDetail({s.student_id})" style="cursor:pointer">{escape(s.roll_number)}</td>
+          <td onclick="showStudentDetail({s.student_id})" style="cursor:pointer">{escape(s.department)}</td>
+          <td onclick="showStudentDetail({s.student_id})" style="cursor:pointer">{s.year_of_study or '-'}</td>
+          <td>{emb_count}</td>
+          <td>{det_count}</td>
+          <td>{status_badge}</td>
+          <td>{action}</td>
+        </tr>""")
+
+    if not rows:
+        return '<p class="empty">No students enrolled yet.</p>'
+    return f"""
+    <table>
+      <thead><tr>
+        <th>ID</th><th>Name</th><th>Roll No.</th><th>Dept</th><th>Year</th>
+        <th>Embeddings</th><th>Detections</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody>{''.join(rows)}</tbody>
+    </table>"""
+
+
+@app.route("/students/<int:student_id>/deactivate", methods=["POST"])
+def deactivate_student(student_id):
+    session = get_session()
+    try:
+        student = session.query(Student).filter_by(student_id=student_id).first()
+        if student:
+            student.is_active = False
+            session.commit()
+    finally:
+        session.close()
+    return redirect(url_for("index"))
+
+
+@app.route("/students/<int:student_id>/reactivate", methods=["POST"])
+def reactivate_student(student_id):
+    session = get_session()
+    try:
+        student = session.query(Student).filter_by(student_id=student_id).first()
+        if student:
+            student.is_active = True
+            session.commit()
+    finally:
+        session.close()
+    return redirect(url_for("index"))
+
+
 # ---- flag section (editable) ---------------------------------------------
 
 def build_flags_section_editable(session):
@@ -588,7 +672,7 @@ def build_closure_section(session):
 
 def build_full_page(session):
     """Assembles the complete dashboard HTML, injecting leave/closure sections."""
-    students_html   = build_students_section(session)
+    students_html   = build_students_section_editable(session)
     detections_html = build_detections_section(session)
     flags_html      = build_flags_section_editable(session)
     student_data    = build_student_detail_data(session)
@@ -618,6 +702,10 @@ def build_full_page(session):
         background: #DC2626; color: white; border: none;
         padding: 3px 10px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; }
       .btn-danger:hover { opacity: 0.85; }
+      .btn {
+        background: var(--accent); color: white; border: none;
+        padding: 3px 10px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; }
+      .btn:hover { opacity: 0.85; }
     </style>"""
 
     leave_section = f"""

@@ -32,10 +32,20 @@ FACE_CROP_PADDING = 0.15    # extra margin around bbox, as a fraction of face si
 
 
 def load_known_embeddings(session):
-    """Pulls all (student_id, embedding, angle_label) rows from the DB into memory."""
-    rows = session.query(FaceEmbedding).all()
+    """
+    Pulls (student_id, embedding, angle_label) rows from the DB into memory,
+    for active students only. Deactivated students (graduated / moved out —
+    see Student.is_active) are excluded so they stop being matched, without
+    deleting their embeddings or any historical detection/flag data.
+    """
+    rows = (
+        session.query(FaceEmbedding)
+        .join(Student, FaceEmbedding.student_id == Student.student_id)
+        .filter(Student.is_active.is_(True))
+        .all()
+    )
     known = [(r.student_id, r.embedding, r.angle_label) for r in rows]
-    print(f"Loaded {len(known)} embeddings for {len(set(s for s, _, _ in known))} students.")
+    print(f"Loaded {len(known)} embeddings for {len(set(s for s, _, _ in known))} active students.")
     return known
 
 
