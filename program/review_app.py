@@ -1,5 +1,5 @@
 import os
-from datetime import date
+from datetime import date, datetime, timezone
 
 import cv2
 import numpy as np
@@ -84,6 +84,7 @@ def enroll_submit():
     dept = request.form.get("dept", "").strip()
     year_raw = request.form.get("year", "").strip()
     year = int(year_raw) if year_raw.isdigit() else None
+    phone = request.form.get("phone", "").strip() or None
 
     if not name or not roll or not dept:
         return jsonify({"ok": False, "error": "Name, roll number, and department are required."}), 400
@@ -139,6 +140,7 @@ def enroll_submit():
                 roll_number=roll,
                 department=dept,
                 year_of_study=year,
+                phone_number=phone,
                 photo_reference_path=captured_photos.get("straight"),
             )
             session.add(student)
@@ -254,6 +256,11 @@ ENROLL_PAGE_HTML = """<!DOCTYPE html>
         <input type="number" id="f-year" min="1" max="6">
       </label>
     </div>
+    <div class="field-row">
+      <label class="field">Phone number
+        <input type="text" id="f-phone" required>
+      </label>
+    </div>
   </section>
 
   <section>
@@ -366,6 +373,7 @@ document.getElementById("submitBtn").addEventListener("click", async () => {
   const roll = document.getElementById("f-roll").value.trim();
   const dept = document.getElementById("f-dept").value.trim();
   const year = document.getElementById("f-year").value.trim();
+  const phone = document.getElementById("f-phone").value.trim();
   const resultBox = document.getElementById("resultBox");
 
   if (!name || !roll || !dept) {
@@ -385,6 +393,7 @@ document.getElementById("submitBtn").addEventListener("click", async () => {
   fd.append("roll", roll);
   fd.append("dept", dept);
   if (year) fd.append("year", year);
+  if (phone) fd.append("phone", phone);
   for (const [pose, blob] of Object.entries(photos)) {
     fd.append(pose, blob, `${pose}.jpg`);
   }
@@ -528,6 +537,14 @@ def build_flags_section_editable(session):
             f'<option value="{s}" {"selected" if s == flag.status else ""}>{s}</option>'
             for s in VALID_STATUSES
         )
+        reviewed_note = ""
+        if flag.reviewed_by:
+            reviewed_when = flag.reviewed_at.strftime('%Y-%m-%d %H:%M') if flag.reviewed_at else "-"
+            reviewed_note = (
+                f'<div class="muted" style="margin-top:4px; font-size:0.75rem;">'
+                f'Last reviewed by {escape(flag.reviewed_by)} on {reviewed_when}'
+                f'{" — " + escape(flag.review_notes) if flag.review_notes else ""}</div>'
+            )
         rows.append(f"""
         <tr>
           <td class="muted" onclick="showStudentDetail({student.student_id})" style="cursor:pointer">{created}</td>
@@ -537,10 +554,15 @@ def build_flags_section_editable(session):
           <td onclick="showStudentDetail({student.student_id})" style="cursor:pointer">{escape(flag.reason)}</td>
           <td onclick="showStudentDetail({student.student_id})" style="cursor:pointer">{flag.score:.2f}</td>
           <td>
-            <form method="POST" action="/flags/{flag.id}/update" class="status-form">
+            <form method="POST" action="/flags/{flag.id}/update" class="status-form" style="flex-wrap:wrap;">
               <select name="status">{options}</select>
+              <input type="text" name="reviewed_by" placeholder="Your name" required
+                     value="{escape(flag.reviewed_by or '')}" style="width:100px;">
+              <input type="text" name="review_notes" placeholder="Notes (optional)"
+                     value="{escape(flag.review_notes or '')}" style="width:140px;">
               <button type="submit">Save</button>
             </form>
+            {reviewed_note}
           </td>
         </tr>""")
     if not rows:
@@ -549,7 +571,7 @@ def build_flags_section_editable(session):
     <table>
       <thead><tr>
         <th>Raised</th><th>Student</th><th>Roll No.</th><th>Signal</th>
-        <th>Reason</th><th>Score</th><th>Status</th>
+        <th>Reason</th><th>Score</th><th>Status / Review</th>
       </tr></thead>
       <tbody>{''.join(rows)}</tbody>
     </table>"""
@@ -749,13 +771,22 @@ def index():
 @app.route("/flags/<int:flag_id>/update", methods=["POST"])
 def update_flag(flag_id):
     new_status = request.form.get("status")
+    reviewed_by = request.form.get("reviewed_by", "").strip()
+    review_notes = request.form.get("review_notes", "").strip() or None
+
     if new_status not in VALID_STATUSES:
         return "Invalid status", 400
+    if not reviewed_by:
+        return "Reviewer name is required.", 400
+
     session = get_session()
     try:
         flag = session.query(Flag).filter_by(id=flag_id).first()
         if flag:
             flag.status = new_status
+            flag.reviewed_by = reviewed_by
+            flag.review_notes = review_notes
+            flag.reviewed_at = datetime.now(timezone.utc)
             session.commit()
     finally:
         session.close()

@@ -399,7 +399,7 @@ def main():
     aggregate_day(session, target_date)
 
     print(f"=== Step 2+3: Baseline + deviation check for {target_date.date()} ===")
-    students = session.query(Student).all()
+    students = session.query(Student).filter(Student.is_active.is_(True)).all()
     for student in students:
         evaluate_student(session, student, target_date)
 

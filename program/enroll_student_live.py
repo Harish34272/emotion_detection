@@ -1,5 +1,3 @@
-
-
 import argparse
 import os
 
@@ -78,6 +76,7 @@ def main():
     parser.add_argument("--roll", required=True)
     parser.add_argument("--dept", required=True)
     parser.add_argument("--year", type=int, required=False)
+    parser.add_argument("--phone", required=False, help="optional contact number")
     parser.add_argument("--camera", default=DEFAULT_CAMERA,
                          help="camera index, RTSP URL, or 'gst:<pipeline>' for a raw GStreamer pipeline")
     args = parser.parse_args()
@@ -136,6 +135,7 @@ def main():
             roll_number=args.roll,
             department=args.dept,
             year_of_study=args.year,
+            phone_number=args.phone,
             photo_reference_path=captured_photos.get("straight"),
         )
         session.add(student)

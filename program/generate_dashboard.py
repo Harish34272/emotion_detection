@@ -154,6 +154,7 @@ def build_student_detail_data(session):
         data[s.student_id] = {
             "name": s.name,
             "roll_number": s.roll_number,
+            "phone_number": s.phone_number,
             "summaries": summary_rows,
             "recent_detections": recent_rows,
             "flags": flag_rows,
@@ -420,6 +421,7 @@ async function showStudentDetail(id) {{
 
   document.getElementById('detailContent').innerHTML = `
     <h2>${{d.name}} <span class="muted">(${{d.roll_number}})</span></h2>
+    ${{d.phone_number ? `<p class="muted">${{d.phone_number}}</p>` : ''}}
     ${{missedHtml}}
     <h3>Recent Photos</h3>
     <div id="photoStrip"><p class="muted">Loading photos…</p></div>
@@ -458,4 +460,3 @@ function closeStudentDetail(e) {{
 </script>
 </body>
 </html>"""
-

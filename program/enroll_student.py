@@ -64,6 +64,7 @@ def main():
     parser.add_argument("--roll", required=True)
     parser.add_argument("--dept", required=True)
     parser.add_argument("--year", type=int, required=False)
+    parser.add_argument("--phone", required=False, help="optional contact number")
     parser.add_argument("--photos", nargs="+", required=True,
                          help="one or more photo paths (straight/left/right)")
     parser.add_argument("--angles", nargs="+", required=True,
@@ -124,6 +125,7 @@ def main():
                 roll_number=args.roll,
                 department=args.dept,
                 year_of_study=args.year,
+                phone_number=args.phone,
                 photo_reference_path=captured_photos.get("straight"),
             )
             session.add(student)
