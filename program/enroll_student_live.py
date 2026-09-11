@@ -1,3 +1,4 @@
+"""enroll_student_live.py"""
 import argparse
 import os
 
@@ -14,8 +15,8 @@ SAVE_DIR = "source_photos/enrollment"   # keeps a copy of captured photos, usefu
 
 POSES = [
     ("straight", "Look directly at the camera"),
-    ("left", "Turn head ~30-45 deg to your LEFT (camera's right)"),
-    ("right", "Turn head ~30-45 deg to your RIGHT (camera's left)"),
+    ("left", "Turn head ~60-85 deg to your LEFT (camera's right)"),
+    ("right", "Turn head ~60-85 deg to your RIGHT (camera's left)"),
 ]
 
 

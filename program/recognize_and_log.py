@@ -1,3 +1,4 @@
+"""recognize_and_log.py"""
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -24,6 +25,7 @@ import cv2
 from deepface import DeepFace
 from face_engine import get_faces, cosine_distance, open_capture, resize_for_display
 from posture import get_posture_for_frame
+from datetime import datetime, timezone
 DISTANCE_THRESHOLD = 0.68  # tune after testing on real enrolled faces (InsightFace cosine distance)
 PROCESS_EVERY_N_FRAMES = 5  # InsightFace is fast enough to sample more often than the DeepFace version
 LOG_COOLDOWN_SECONDS = 60   # don't log the same student twice within this window
@@ -327,6 +329,7 @@ def main():
                         event = DetectionEvent(
                             student_id=student_id,
                             camera_id=camera.camera_id,
+                            timestamp=datetime.now(timezone.utc),
                             matched_confidence=float(1 - distance),
                             emotion_label=emotion_label,
                             emotion_confidence=float(emotion_confidence) if emotion_confidence is not None else None,

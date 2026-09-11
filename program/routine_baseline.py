@@ -1,9 +1,10 @@
+"""routine_baseline.py"""
 import argparse
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 from db import get_session
-from models import Student, DetectionEvent, Camera, DailyActivitySummary, Flag, StudentLeave, HostelClosure
+from models import Student, DetectionEvent, Camera, DailyActivitySummary, Flag, StudentLeave, HostelClosure, WellnessScore
 
 # ---- configuration -------------------------------------------------------
 
@@ -28,6 +29,15 @@ NEGATIVE_EMOTIONS = {"sad", "angry", "fear", "disgust"}
 
 EMOTION_MIN_DAYS = 3
 EMOTION_NEG_RATIO_THRESHOLD = 0.5
+
+# ---- wellness score configuration -----------------------------------------
+# Composite 1.0 (bad) - 5.0 (good) indicator combining meal attendance,
+# emotion, and veranda presence over a 7-day rolling window (same window as
+# FLAG_COOLDOWN_DAYS, so the score and the flags tell a consistent story).
+WELLNESS_WINDOW_DAYS = 7
+WELLNESS_WEIGHTS = {"meal": 0.4, "emotion": 0.3, "veranda": 0.3}
+WELLNESS_VERANDA_MIN_BASELINE = 1.0  # below this, veranda usage is too rare to score meaningfully
+MIN_DAYS_ENROLLED_FOR_WELLNESS_SCORE = 2  # avoid scoring someone off a partial first day
 
 SCORE_MISSED_MEAL_STREAK   = 0.4
 SCORE_TIME_DRIFT           = 0.2
@@ -383,6 +393,130 @@ def evaluate_student(session, student, target_date):
     session.commit()
 
 
+def compute_wellness_score(session, student, target_date):
+    """
+    Computes and stores this student's 1.0-5.0 wellness score for target_date,
+    based on the trailing WELLNESS_WINDOW_DAYS. Each factor is 0.0-1.0; a
+    factor that has no data for the window is excluded and the remaining
+    factors' weights are renormalized, rather than treating "no data" as
+    "bad" or "neutral" -- a camera gap shouldn't read as a wellness dip.
+    """
+    day_start = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Don't score off a partial first day or two of enrollment -- there's
+    # nothing meaningful to compare yet.
+    enrolled_date = student.enrolled_at.date() if student.enrolled_at else day_start.date()
+    days_enrolled = (day_start.date() - enrolled_date).days + 1
+    if days_enrolled < MIN_DAYS_ENROLLED_FOR_WELLNESS_SCORE:
+        return
+
+    window_start = day_start - timedelta(days=WELLNESS_WINDOW_DAYS - 1)
+    # Clip to enrollment so pre-enrollment days aren't counted as "0 meals missed".
+    effective_start = max(window_start, day_start.replace(
+        year=enrolled_date.year, month=enrolled_date.month, day=enrolled_date.day
+    ))
+
+    week_rows = (
+        session.query(DailyActivitySummary)
+        .filter(
+            DailyActivitySummary.student_id == student.student_id,
+            DailyActivitySummary.date >= effective_start,
+            DailyActivitySummary.date <= day_start,
+        )
+        .all()
+    )
+    row_by_date = {r.date.date(): r for r in week_rows}
+
+    # --- meal factor: a day with no summary row means zero detections that
+    # day, which -- consistent with check_missed_meal_streak -- counts as
+    # 0 meals attended. But a day the student was on approved leave, or the
+    # hostel was closed, is excluded entirely rather than counted as missed;
+    # otherwise a student on leave (or an entire hostel on holiday) would
+    # show a misleadingly bad score for being exactly where they're supposed
+    # to be. ---
+    num_days = (day_start.date() - effective_start.date()).days + 1
+    meal_ratios = []
+    for i in range(num_days):
+        d = day_start.date() - timedelta(days=i)
+        exempt, _ = is_exempt(session, student.student_id, d)
+        if exempt:
+            continue
+        row = row_by_date.get(d)
+        attended = sum([
+            bool(row.breakfast_attended), bool(row.lunch_attended), bool(row.dinner_attended)
+        ]) if row else 0
+        meal_ratios.append(attended / 3)
+    meal_factor = (sum(meal_ratios) / len(meal_ratios)) if meal_ratios else None
+
+    # --- emotion factor: only from days that actually recorded a ratio.
+    # If nobody's emotion was captured all week (frontality gate skipped
+    # every read, say), this factor is excluded, not assumed negative. ---
+    neg_ratios = [r.avg_emotion_negative_ratio for r in week_rows if r.avg_emotion_negative_ratio is not None]
+    emotion_factor = None
+    if neg_ratios:
+        emotion_factor = max(0.0, min(1.0, 1 - (sum(neg_ratios) / len(neg_ratios))))
+
+    # --- veranda factor: this week's average vs. the student's own longer
+    # baseline (same BASELINE_WINDOW_DAYS the routine flags already use).
+    # If the student barely uses the veranda normally, there's no meaningful
+    # baseline to compare against, so this factor is excluded rather than
+    # rewarding/penalizing noise around a near-zero baseline. ---
+    baseline_start = window_start - timedelta(days=BASELINE_WINDOW_DAYS)
+    baseline_rows = (
+        session.query(DailyActivitySummary)
+        .filter(
+            DailyActivitySummary.student_id == student.student_id,
+            DailyActivitySummary.date >= baseline_start,
+            DailyActivitySummary.date < window_start,
+        )
+        .all()
+    )
+    veranda_factor = None
+    if baseline_rows:
+        baseline_avg = sum(r.veranda_sightings for r in baseline_rows) / len(baseline_rows)
+        if baseline_avg >= WELLNESS_VERANDA_MIN_BASELINE:
+            week_avg = sum(r.veranda_sightings for r in week_rows) / len(week_rows) if week_rows else 0.0
+            veranda_factor = max(0.0, min(1.0, week_avg / baseline_avg))
+
+    factors = {}
+    if meal_factor is not None:
+        factors["meal"] = meal_factor
+    if emotion_factor is not None:
+        factors["emotion"] = emotion_factor
+    if veranda_factor is not None:
+        factors["veranda"] = veranda_factor
+
+    existing = session.query(WellnessScore).filter_by(student_id=student.student_id, date=day_start).first()
+
+    if not factors:
+        # Nothing to score off (e.g. entire window was on leave/closure with
+        # no prior veranda baseline) -- don't write a misleading number.
+        if existing:
+            existing.score = None
+            existing.factors_used = 0
+            existing.meal_factor = None
+            existing.emotion_factor = None
+            existing.veranda_factor = None
+            session.commit()
+        return
+
+    total_weight = sum(WELLNESS_WEIGHTS[k] for k in factors)
+    weighted_sum = sum(WELLNESS_WEIGHTS[k] * v for k, v in factors.items())
+    normalized = weighted_sum / total_weight
+    score = round(1 + normalized * 4, 2)
+
+    ws = existing or WellnessScore(student_id=student.student_id, date=day_start)
+    if not existing:
+        session.add(ws)
+
+    ws.score = score
+    ws.factors_used = len(factors)
+    ws.meal_factor = meal_factor
+    ws.emotion_factor = emotion_factor
+    ws.veranda_factor = veranda_factor
+    session.commit()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", help="YYYY-MM-DD, defaults to yesterday")
@@ -402,6 +536,10 @@ def main():
     students = session.query(Student).filter(Student.is_active.is_(True)).all()
     for student in students:
         evaluate_student(session, student, target_date)
+
+    print(f"=== Step 4: Wellness score for {target_date.date()} ===")
+    for student in students:
+        compute_wellness_score(session, student, target_date)
 
     session.close()
     print("Done.")

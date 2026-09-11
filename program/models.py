@@ -1,3 +1,4 @@
+"""models.py"""
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, ForeignKey, JSON, Float, Boolean, Date
 )
@@ -17,10 +18,20 @@ class Student(Base):
     year_of_study = Column(Integer, nullable=True)  # 1/2/3/4
     photo_reference_path = Column(Text, nullable=True)
     enrolled_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Soft-delete flag: when False, the student is excluded from face-recognition
+    # matching (recognize_and_log.py) and from the default enrolled-students view,
+    # but every historical detection/flag/summary row is kept intact. Used for
+    # students who've graduated or moved out, instead of a hard DB delete, since
+    # a hard delete would either orphan Flag rows (FK is non-nullable there) or
+    # silently discard behavioral history that's the whole point of this system.
     is_active = Column(Boolean, nullable=False, default=True, server_default="true")
     phone_number = Column(String(20), nullable=True)
+
     # --- add new fields here later, e.g.: ---
     # hostel_block = Column(String(50), nullable=True)
+    # phone_number = Column(String(20), nullable=True)
+
     embeddings = relationship("FaceEmbedding", back_populates="student", cascade="all, delete-orphan")
     detections = relationship("DetectionEvent", back_populates="student")
     flags = relationship("Flag", back_populates="student")
@@ -113,6 +124,39 @@ class DailyActivitySummary(Base):
 
     avg_emotion_negative_ratio = Column(Float, nullable=True)
     avg_head_drop = Column(Float, nullable=True)
+
+    student = relationship("Student")
+
+
+class WellnessScore(Base):
+    """
+    Daily composite wellness indicator (1.0 bad -- 5.0 good), combining meal
+    attendance, emotion, and veranda presence into one number for quick
+    scanning. Stored per student per day, independent of DailyActivitySummary
+    -- a day with zero detections still gets a score (that's itself a real
+    signal for the meal factor), whereas DailyActivitySummary rows only get
+    created for students who appeared in at least one event that day.
+
+    Individual factor values are kept alongside the final score so the number
+    is never a black box -- same "interpretable over sophisticated" principle
+    used for the routine_baseline z-score/streak flags. A None factor means
+    that signal wasn't available that week (not that it was bad) and was
+    excluded from the weighted average rather than penalizing the student.
+    """
+    __tablename__ = "wellness_scores"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    student_id = Column(Integer, ForeignKey("students.student_id"), nullable=False)
+    date = Column(DateTime(timezone=True), nullable=False)  # date-truncated (midnight), same convention as DailyActivitySummary
+
+    score = Column(Float, nullable=True)          # 1.0-5.0, None if no factors were available at all
+    factors_used = Column(Integer, nullable=False, default=0)  # how many of the 3 factors contributed (0-3)
+
+    meal_factor = Column(Float, nullable=True)     # 0.0-1.0, always available (absence itself is the signal)
+    emotion_factor = Column(Float, nullable=True)  # 0.0-1.0, None if no emotion data in the window
+    veranda_factor = Column(Float, nullable=True)  # 0.0-1.0, None if no meaningful baseline to compare against
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     student = relationship("Student")
 

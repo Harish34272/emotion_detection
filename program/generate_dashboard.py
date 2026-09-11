@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from html import escape
 
 from db import get_session
-from models import Student, FaceEmbedding, Camera, DetectionEvent, Flag, DailyActivitySummary
+from models import Student, FaceEmbedding, Camera, DetectionEvent, Flag, DailyActivitySummary, WellnessScore
 
 OUTPUT_FILE = "emotional_detection_dashboard.html"
 RECENT_DETECTIONS_LIMIT = 30
@@ -15,6 +15,36 @@ STATUS_COLORS = {
     "dismissed": "#6B7280", # gray
     "handled": "#1F7A4D",   # green
 }
+
+
+def get_latest_wellness_scores(session):
+    """
+    Returns {student_id: WellnessScore} using each student's most recent row.
+    Fetches all rows and reduces in Python for simplicity; fine at
+    hostel scale, but worth revisiting with a proper "latest per group"
+    query if the wellness_scores table grows very large.
+    """
+    rows = session.query(WellnessScore).order_by(WellnessScore.date.desc()).all()
+    latest = {}
+    for r in rows:
+        if r.student_id not in latest:
+            latest[r.student_id] = r
+    return latest
+
+
+def wellness_badge(ws):
+    """Renders a colored pill for a WellnessScore row (or None -> a dash)."""
+    if ws is None or ws.score is None:
+        return '<span class="muted">—</span>'
+    score = ws.score
+    if score <= 2:
+        color = "#B4231E"  # red
+    elif score <= 3.5:
+        color = "#B45309"  # amber
+    else:
+        color = "#1F7A4D"  # green
+    title = f"{ws.factors_used}/3 signals available"
+    return f'<span class="status-pill" style="background:{color}" title="{title}">{score:.1f}</span>'
 
 
 def build_students_section(session, include_inactive=False):
@@ -28,6 +58,7 @@ def build_students_section(session, include_inactive=False):
     if not include_inactive:
         query = query.filter(Student.is_active.is_(True))
     students = query.order_by(Student.name).all()
+    wellness = get_latest_wellness_scores(session)
     rows = []
     for s in students:
         emb_count = session.query(FaceEmbedding).filter_by(student_id=s.student_id).count()
@@ -39,6 +70,7 @@ def build_students_section(session, include_inactive=False):
           <td>{escape(s.roll_number)}</td>
           <td>{escape(s.department)}</td>
           <td>{s.year_of_study or '-'}</td>
+          <td>{wellness_badge(wellness.get(s.student_id))}</td>
           <td>{emb_count}</td>
           <td>{det_count}</td>
           <td class="muted">{s.enrolled_at.strftime('%Y-%m-%d') if s.enrolled_at else '-'}</td>
@@ -49,7 +81,7 @@ def build_students_section(session, include_inactive=False):
     <table>
       <thead><tr>
         <th>ID</th><th>Name</th><th>Roll No.</th><th>Dept</th><th>Year</th>
-        <th>Embeddings</th><th>Detections</th><th>Enrolled</th>
+        <th>Wellness</th><th>Embeddings</th><th>Detections</th><th>Enrolled</th>
       </tr></thead>
       <tbody>{''.join(rows)}</tbody>
     </table>"""
@@ -115,6 +147,24 @@ def build_student_detail_data(session):
             "veranda_sightings": row.veranda_sightings,
         } for row in summaries]
 
+        # last 10 wellness scores, most recent first -- includes the factor
+        # breakdown so the number is never a black box in the UI either.
+        wellness_rows_q = (
+            session.query(WellnessScore)
+            .filter_by(student_id=s.student_id)
+            .order_by(WellnessScore.date.desc())
+            .limit(10)
+            .all()
+        )
+        wellness_history = [{
+            "date": row.date.strftime("%Y-%m-%d"),
+            "score": row.score,
+            "factors_used": row.factors_used,
+            "meal_factor": row.meal_factor,
+            "emotion_factor": row.emotion_factor,
+            "veranda_factor": row.veranda_factor,
+        } for row in wellness_rows_q]
+
         # last 15 raw detections
         recent = (
             session.query(DetectionEvent, Camera)
@@ -156,6 +206,7 @@ def build_student_detail_data(session):
             "roll_number": s.roll_number,
             "phone_number": s.phone_number,
             "summaries": summary_rows,
+            "wellness_history": wellness_history,
             "recent_detections": recent_rows,
             "flags": flag_rows,
             "missed_today": missed_today,
@@ -405,6 +456,29 @@ async function showStudentDetail(id) {{
       <td>${{r.veranda_sightings}}</td>
     </tr>`).join('');
 
+  function wellnessColor(score) {{
+    if (score == null) return '#6B7280';
+    if (score <= 2) return '#B4231E';
+    if (score <= 3.5) return '#B45309';
+    return '#1F7A4D';
+  }}
+  function factorPct(v) {{ return v == null ? '—' : Math.round(v * 100) + '%'; }}
+
+  const latestWellness = (d.wellness_history && d.wellness_history[0]) || null;
+  const latestScoreHtml = latestWellness && latestWellness.score != null
+    ? `<span class="status-pill" style="background:${{wellnessColor(latestWellness.score)}}">${{latestWellness.score.toFixed(1)}} / 5</span>
+       <span class="muted" style="margin-left:8px;">${{latestWellness.factors_used}}/3 signals</span>`
+    : `<span class="muted">Not enough data yet</span>`;
+
+  const wellnessRows = (d.wellness_history || []).map(w => `
+    <tr>
+      <td class="muted">${{w.date}}</td>
+      <td>${{w.score != null ? `<span class="status-pill" style="background:${{wellnessColor(w.score)}}">${{w.score.toFixed(1)}}</span>` : '<span class="muted">—</span>'}}</td>
+      <td class="muted">${{factorPct(w.meal_factor)}}</td>
+      <td class="muted">${{factorPct(w.emotion_factor)}}</td>
+      <td class="muted">${{factorPct(w.veranda_factor)}}</td>
+    </tr>`).join('');
+
   const detectionRows = d.recent_detections.map(r => `
     <tr>
       <td class="muted">${{r.timestamp}}</td>
@@ -422,9 +496,13 @@ async function showStudentDetail(id) {{
   document.getElementById('detailContent').innerHTML = `
     <h2>${{d.name}} <span class="muted">(${{d.roll_number}})</span></h2>
     ${{d.phone_number ? `<p class="muted">${{d.phone_number}}</p>` : ''}}
+    <p>${{latestScoreHtml}}</p>
     ${{missedHtml}}
     <h3>Recent Photos</h3>
     <div id="photoStrip"><p class="muted">Loading photos…</p></div>
+    <h3>Wellness Trend (7-day rolling score)</h3>
+    <table><thead><tr><th>Date</th><th>Score</th><th>Meal</th><th>Emotion</th><th>Veranda</th></tr></thead>
+    <tbody>${{wellnessRows || '<tr><td colspan=5 class="empty">No data yet</td></tr>'}}</tbody></table>
     <h3>Last 10 Days — Meal Attendance</h3>
     <table><thead><tr><th>Date</th><th>B</th><th>L</th><th>D</th><th>Veranda</th></tr></thead>
     <tbody>${{summaryRows || '<tr><td colspan=5 class="empty">No data</td></tr>'}}</tbody></table>
