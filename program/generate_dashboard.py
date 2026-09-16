@@ -73,7 +73,7 @@ def build_students_section(session, include_inactive=False):
           <td>{wellness_badge(wellness.get(s.student_id))}</td>
           <td>{emb_count}</td>
           <td>{det_count}</td>
-          <td class="muted">{s.enrolled_at.strftime('%Y-%m-%d') if s.enrolled_at else '-'}</td>
+          <td class="muted">{fmt_ist(s.enrolled_at, '%Y-%m-%d') if s.enrolled_at else '-'}</td>
         </tr>""")
     if not rows:
         return '<p class="empty">No students enrolled yet.</p>'
@@ -100,7 +100,7 @@ def build_detections_section(session):
     for event, student, camera in events:
         conf = f"{event.matched_confidence:.2f}" if event.matched_confidence is not None else "-"
         emotion = escape(event.emotion_label) if event.emotion_label else "-"
-        ts = event.timestamp.strftime('%Y-%m-%d %H:%M:%S') if event.timestamp else "-"
+        ts = fmt_ist(event.timestamp, '%Y-%m-%d %H:%M:%S')
         rows.append(f"""
         <tr>
           <td class="muted">{ts}</td>
@@ -175,7 +175,7 @@ def build_student_detail_data(session):
             .all()
         )
         recent_rows = [{
-            "timestamp": event.timestamp.strftime("%Y-%m-%d %H:%M"),
+            "timestamp": fmt_ist(event.timestamp, '%Y-%m-%d %H:%M'),
             "camera": camera.location_name,
             "emotion": event.emotion_label,
         } for event, camera in recent]
@@ -189,7 +189,7 @@ def build_student_detail_data(session):
             .all()
         )
         flag_rows = [{
-            "created_at": f.created_at.strftime("%Y-%m-%d %H:%M") if f.created_at else "-",
+            "created_at": fmt_ist(f.created_at) if f.created_at else "-",
             "reason": f.reason,
             "status": f.status,
             "score": f.score,
@@ -223,7 +223,7 @@ def build_flags_section(session):
     rows = []
     for flag, student in flags:
         color = STATUS_COLORS.get(flag.status, "#6B7280")
-        created = flag.created_at.strftime('%Y-%m-%d %H:%M') if flag.created_at else "-"
+        created = fmt_ist(flag.created_at) if flag.created_at else "-"
         rows.append(f"""
         <tr onclick="showStudentDetail({student.student_id})" style="cursor:pointer" class="student-row">
           <td class="muted">{created}</td>
@@ -245,9 +245,24 @@ def build_flags_section(session):
       <tbody>{''.join(rows)}</tbody>
     </table>"""
 
+from datetime import timezone, timedelta
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def to_ist(dt):
+    """Convert a UTC datetime to IST for display."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)  # assume UTC if naive
+    return dt.astimezone(IST)
+
+def fmt_ist(dt, fmt='%Y-%m-%d %H:%M'):
+    """Format a UTC datetime as IST string."""
+    ist = to_ist(dt)
+    return ist.strftime(fmt) if ist else '-'
 def build_html(students_html, detections_html, flags_html, pending_count, student_data):
-    generated_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    generated_at = fmt_ist(datetime.now(timezone.utc))
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
